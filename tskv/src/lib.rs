@@ -6,36 +6,33 @@ use std::sync::Arc;
 use async_trait::async_trait;
 pub use compaction::check::vnode_table_checksum_schema;
 use compaction::CompactTask;
-use context::GlobalContext;
 use datafusion::arrow::record_batch::RecordBatch;
+use memory_pool::MemoryPool;
+use meta::model::MetaRef;
+use metrics::metric_register::MetricsRegister;
 use models::meta_data::{NodeId, VnodeId};
 use models::predicate::domain::ColumnDomains;
 use models::{SeriesId, SeriesKey};
 use serde::{Deserialize, Serialize};
-use summary::SummaryTask;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::RwLock;
-use tsfamily::version::Version;
-use version_set::VersionSet;
+use tsfamily::version::{Version, VersionEdit};
 use vnode_store::VnodeStorage;
 
 pub use crate::error::{TskvError, TskvResult};
 pub use crate::kv_option::Options;
 use crate::kv_option::StorageOptions;
 pub use crate::kvcore::TsKv;
-pub use crate::summary::{print_summary_statistics, Summary, VersionEdit};
-use crate::tsfamily::super_version::SuperVersion;
 // todo: add a method for print tsm statistics
 // pub use crate::tsm::print_tsm_statistics;
+pub use crate::tsfamily::summary::print_summary_statistics;
+use crate::tsfamily::super_version::SuperVersion;
 pub use crate::wal::print_wal_statistics;
 
 pub mod byte_utils;
 mod compaction;
 mod compute;
-mod context;
 pub mod database;
-pub mod engine_mock;
 pub mod error;
 pub mod file_system;
 pub mod file_utils;
@@ -47,7 +44,6 @@ mod mem_cache;
 pub mod reader;
 mod record_file;
 mod schema;
-mod summary;
 mod tsfamily;
 pub mod tsm;
 mod version_set;
@@ -138,15 +134,14 @@ pub trait Engine: Send + Sync + Debug {
     async fn close(&self);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TsKvContext {
+    pub meta: MetaRef,
     pub runtime: Arc<Runtime>,
     pub options: Arc<Options>,
-    pub global_ctx: Arc<GlobalContext>,
-    pub version_set: Arc<RwLock<VersionSet>>,
-
+    pub metrics: Arc<MetricsRegister>,
+    pub memory_pool: Arc<dyn MemoryPool>,
     pub compact_task_sender: Sender<CompactTask>,
-    pub summary_task_sender: Sender<SummaryTask>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

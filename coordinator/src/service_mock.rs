@@ -17,9 +17,7 @@ use models::schema::tskv_table_schema::TskvTableSchemaRef;
 use protocol_parser::Line;
 use protos::kv_service::{RaftWriteCommand, UpdateSetValue};
 use trace::SpanContext;
-use tskv::engine_mock::MockEngine;
 use tskv::reader::QueryOption;
-use tskv::EngineRef;
 use utils::precision::Precision;
 
 use crate::errors::CoordinatorResult;
@@ -41,10 +39,6 @@ impl Coordinator for MockCoordinator {
 
     fn meta_manager(&self) -> MetaRef {
         Arc::new(AdminMeta::mock())
-    }
-
-    fn store_engine(&self) -> Option<EngineRef> {
-        Some(Arc::new(MockEngine::default()))
     }
 
     fn raft_manager(&self) -> Arc<RaftNodesManager> {

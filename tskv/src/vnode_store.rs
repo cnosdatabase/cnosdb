@@ -21,14 +21,16 @@ use crate::database::Database;
 use crate::error::{IndexErrSnafu, InvalidParamSnafu, InvalidPointTableSnafu, TskvResult};
 use crate::index::ts_index::TSIndex;
 use crate::schema::error::{FieldNotFoundSnafu, TableNotFoundSnafu};
+use crate::tsfamily::summary::Summary;
 use crate::tsfamily::tseries_family::TseriesFamily;
-use crate::{TsKvContext, VnodeSnapshot};
+use crate::{file_utils, TsKvContext, VnodeSnapshot};
 
 #[derive(Clone)]
 pub struct VnodeStorage {
     id: VnodeId,
     ctx: Arc<TsKvContext>,
     db: Arc<RwLock<Database>>,
+    summary: Arc<RwLock<Summary>>,
     flush_job: Arc<FlushJob>,
     ts_index: Arc<RwLock<TSIndex>>,
     ts_family: Arc<RwLock<TseriesFamily>>,
@@ -42,18 +44,19 @@ pub struct VnodeStorage {
 
 impl VnodeStorage {
     pub fn new(
+        ctx: Arc<TsKvContext>,
         id: VnodeId,
         db: Arc<RwLock<Database>>,
+        summary: Arc<RwLock<Summary>>,
         ts_index: Arc<RwLock<TSIndex>>,
         ts_family: Arc<RwLock<TseriesFamily>>,
-        ctx: Arc<TsKvContext>,
     ) -> Self {
-        let flush_job = FlushJob::new(ctx.clone());
-
+        let flush_job = FlushJob::new(ctx.clone(), summary.clone());
         Self {
             id,
-            ctx,
             db,
+            ctx,
+            summary,
             flush_job,
             ts_index,
             ts_family,
@@ -175,26 +178,29 @@ impl VnodeStorage {
     ) -> TskvResult<()> {
         info!("Snapshot: apply snapshot {}", snapshot);
 
-        let vnode_id = self.id;
-        let owner = self.ts_family.read().await.owner();
-        let storage_opt = self.ctx.options.storage.clone();
-
         // clear all snapshot
         self.snapshots = vec![];
 
         // delete already exist data
         let mut db_wlock = self.db.write().await;
-        let summary_sender = self.ctx.summary_task_sender.clone();
-        db_wlock.del_tsfamily(vnode_id, summary_sender).await;
-        db_wlock.del_ts_index(vnode_id);
-        let vnode_dir = storage_opt.ts_family_dir(&owner, vnode_id);
-        let _ = std::fs::remove_dir_all(&vnode_dir);
+        db_wlock.del_tsfamily_index(self.id);
+
+        // reopen new summary file
+        let summary_file = file_utils::make_tsfamily_summary_file(
+            self.ctx
+                .options
+                .storage
+                .ts_family_dir(&db_wlock.owner(), self.id),
+        );
+
+        let summary = Summary::new(self.id, self.ctx.clone(), summary_file).await?;
+        *self.summary.write().await = summary;
 
         // apply data and reopen
         let mut version_edit = snapshot.version_edit.clone();
-        version_edit.update_vnode_id(vnode_id);
+        version_edit.update_vnode_id(self.id);
         let ts_family = db_wlock
-            .add_tsfamily(version_edit, shapshot_dir, self.ctx.clone())
+            .add_tsfamily(version_edit, shapshot_dir, self.summary.clone())
             .await?;
 
         let ts_index = db_wlock.rebuild_tsfamily_index(ts_family.clone()).await?;
@@ -598,6 +604,14 @@ impl VnodeStorage {
         }
 
         Ok(())
+    }
+
+    pub fn get_summary(&self) -> Arc<RwLock<Summary>> {
+        self.summary.clone()
+    }
+
+    pub fn get_ts_family(&self) -> Arc<RwLock<TseriesFamily>> {
+        self.ts_family.clone()
     }
 
     pub async fn sync_index(&self) {

@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use memory_pool::MemoryPoolRef;
 use metrics::gauge::U64Gauge;
 use metrics::metric;
-use metrics::metric_register::MetricsRegister;
 use models::meta_data::VnodeStatus;
 use models::predicate::domain::{TimeRange, TimeRanges};
 use models::schema::database_schema::{split_owner, DatabaseConfig};
@@ -17,69 +15,51 @@ use snafu::ResultExt;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::time::Instant;
 use trace::{debug, info};
+use utils::id_generator::IDGenerator;
 use utils::BloomFilter;
 
 use super::cache_group::CacheGroup;
 use super::super_version::SuperVersion;
 use super::tsf_metrics::TsfMetrics;
-use super::version::Version;
+use super::version::{CompactMeta, Version, VersionEdit};
 use crate::compaction::metrics::FlushMetrics;
-use crate::context::GlobalContext;
 use crate::error::{CommonSnafu, IndexErrSnafu, TskvResult};
 use crate::index::ts_index::TSIndex;
 use crate::kv_option::StorageOptions;
 use crate::mem_cache::memcache::MemCache;
 use crate::mem_cache::series_data::RowGroup;
-use crate::summary::{CompactMeta, VersionEdit};
-use crate::{ColumnFileId, Options, VnodeId};
+use crate::{ColumnFileId, TsKvContext, VnodeId};
 
-#[derive(Debug)]
 pub struct TsfFactory {
-    // "tenant.db"
     owner: Arc<String>,
-    options: Arc<Options>,
-    ctx: Arc<GlobalContext>,
+    ctx: Arc<TsKvContext>,
     db_config: Arc<DatabaseConfig>,
-    memory_pool: MemoryPoolRef,
-    metrics_register: Arc<MetricsRegister>,
 }
 impl TsfFactory {
-    pub fn new(
-        owner: Arc<String>,
-        options: Arc<Options>,
-        ctx: Arc<GlobalContext>,
-        db_config: Arc<DatabaseConfig>,
-        memory_pool: MemoryPoolRef,
-        metrics_register: Arc<MetricsRegister>,
-    ) -> Self {
+    pub fn new(ctx: Arc<TsKvContext>, owner: Arc<String>, db_config: Arc<DatabaseConfig>) -> Self {
         Self {
-            owner,
-            options,
             ctx,
+            owner,
             db_config,
-            memory_pool,
-            metrics_register,
         }
     }
 
     pub fn create_tsf(
         &self,
         tf_id: VnodeId,
+        file_id: IDGenerator,
         version: Arc<Version>,
     ) -> Arc<TokioRwLock<TseriesFamily>> {
         let mut_cache = Arc::new(RwLock::new(MemCache::new(
             tf_id,
-            self.ctx.file_id_next(),
+            file_id.next_id(),
             self.db_config.max_memcache_size(),
             self.db_config.memcache_partitions() as usize,
             version.last_seq(),
-            &self.memory_pool,
+            &self.ctx.memory_pool.clone(),
         )));
-        let tsf_metrics = TsfMetrics::new(
-            self.metrics_register.clone(),
-            self.owner.as_str(),
-            tf_id as u64,
-        );
+        let tsf_metrics =
+            TsfMetrics::new(self.ctx.metrics.clone(), self.owner.as_str(), tf_id as u64);
         let super_version = Arc::new(SuperVersion::new(
             tf_id,
             CacheGroup {
@@ -92,16 +72,16 @@ impl TsfFactory {
 
         let tsfamily = Arc::new(TokioRwLock::new(TseriesFamily {
             tf_id,
-            ctx: self.ctx.clone(),
-            owner: self.owner.clone(),
+            file_id,
             mut_cache,
             immut_cache: vec![],
             super_version,
+            ctx: self.ctx.clone(),
+            owner: self.owner.clone(),
             super_version_id: AtomicU64::new(0),
             db_config: self.db_config.clone(),
-            storage_opt: self.options.storage.clone(),
             last_modified: Arc::new(Default::default()),
-            memory_pool: self.memory_pool.clone(),
+
             tsf_metrics,
             status: VnodeStatus::Running,
         }));
@@ -113,67 +93,26 @@ impl TsfFactory {
 
     pub fn drop_tsf(&self, tf_id: u32) {
         //todo other's thing may need to drop
-        TsfMetrics::drop(&self.metrics_register, self.owner.as_str(), tf_id as u64);
+        TsfMetrics::drop(&self.ctx.metrics, self.owner.as_str(), tf_id as u64);
     }
 }
 
-#[derive(Debug)]
 pub struct TseriesFamily {
+    ctx: Arc<TsKvContext>,
     tf_id: VnodeId,
-    ctx: Arc<GlobalContext>,
     owner: Arc<String>,
+    file_id: IDGenerator,
     mut_cache: Arc<RwLock<MemCache>>,
     immut_cache: Vec<Arc<RwLock<MemCache>>>,
     super_version: Arc<SuperVersion>,
     super_version_id: AtomicU64,
     db_config: Arc<DatabaseConfig>,
-    storage_opt: Arc<StorageOptions>,
     last_modified: Arc<tokio::sync::RwLock<Option<Instant>>>,
-    memory_pool: MemoryPoolRef,
     tsf_metrics: TsfMetrics,
     status: VnodeStatus,
 }
 
 impl TseriesFamily {
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub fn new(
-        tf_id: VnodeId,
-        owner: Arc<String>,
-        cache: MemCache,
-        version: Arc<Version>,
-        db_config: Arc<DatabaseConfig>,
-        storage_opt: Arc<StorageOptions>,
-        memory_pool: MemoryPoolRef,
-        register: &Arc<MetricsRegister>,
-    ) -> Self {
-        let mm = Arc::new(RwLock::new(cache));
-
-        Self {
-            tf_id,
-            ctx: Arc::new(GlobalContext::new()),
-            owner: owner.clone(),
-            mut_cache: mm.clone(),
-            immut_cache: Default::default(),
-            super_version: Arc::new(SuperVersion::new(
-                tf_id,
-                CacheGroup {
-                    mut_cache: mm,
-                    immut_cache: Default::default(),
-                },
-                version.clone(),
-                0,
-            )),
-            super_version_id: AtomicU64::new(0),
-            db_config,
-            storage_opt,
-            last_modified: Arc::new(tokio::sync::RwLock::new(None)),
-            memory_pool,
-            tsf_metrics: TsfMetrics::new(register.clone(), owner.as_str(), tf_id as u64),
-            status: VnodeStatus::Running,
-        }
-    }
-
     fn new_super_version(&mut self, version: Arc<Version>) {
         self.super_version_id.fetch_add(1, Ordering::SeqCst);
         self.tsf_metrics.record_disk_storage(self.disk_storage());
@@ -226,11 +165,11 @@ impl TseriesFamily {
 
         self.mut_cache = Arc::from(RwLock::new(MemCache::new(
             self.tf_id,
-            self.ctx.file_id_next(),
+            self.file_id.next_id(),
             self.db_config.max_memcache_size(),
             self.db_config.memcache_partitions() as usize,
             seq_no,
-            &self.memory_pool,
+            &self.ctx.memory_pool,
         )));
 
         self.new_super_version(self.version());
@@ -260,7 +199,7 @@ impl TseriesFamily {
         if self.mut_cache.read().is_full() {
             info!(
                 "mut_cache is full, switch to immutable. current pool_size : {}",
-                self.memory_pool.reserved()
+                self.ctx.memory_pool.reserved()
             );
             self.switch_to_immutable();
 
@@ -319,7 +258,7 @@ impl TseriesFamily {
             .iter()
             .flat_map(|level| level.files.clone())
             .collect::<Vec<_>>();
-        let encode_tsm_meta = self.storage_opt.tsm_meta_compress;
+        let encode_tsm_meta = self.ctx.options.storage.tsm_meta_compress;
         for file in files {
             if let Some(path) = file.update_tag_value(&series, encode_tsm_meta).await? {
                 self.version().remove_tsm_reader_cache(path).await;
@@ -365,10 +304,14 @@ impl TseriesFamily {
     }
 
     pub async fn rebuild_index(&self) -> TskvResult<Arc<tokio::sync::RwLock<TSIndex>>> {
-        let path = self.storage_opt.index_dir(self.owner.as_str(), self.tf_id);
+        let path = self
+            .ctx
+            .options
+            .storage
+            .index_dir(self.owner.as_str(), self.tf_id);
         let _ = std::fs::remove_dir_all(path.clone());
 
-        let capacity = self.storage_opt.index_cache_capacity;
+        let capacity = self.ctx.options.storage.index_cache_capacity;
         let index = TSIndex::new(path, capacity).await.context(IndexErrSnafu)?;
         let index_clone = index.clone();
         let mut index_w = index_clone.write().await;
@@ -433,15 +376,15 @@ impl TseriesFamily {
     }
 
     pub fn storage_opt(&self) -> Arc<StorageOptions> {
-        self.storage_opt.clone()
+        self.ctx.options.storage.clone()
     }
 
     pub fn get_delta_dir(&self) -> PathBuf {
-        self.storage_opt.delta_dir(&self.owner, self.tf_id)
+        self.ctx.options.storage.delta_dir(&self.owner, self.tf_id)
     }
 
     pub fn get_tsm_dir(&self) -> PathBuf {
-        self.storage_opt.tsm_dir(&self.owner, self.tf_id)
+        self.ctx.options.storage.tsm_dir(&self.owner, self.tf_id)
     }
 
     pub fn disk_storage(&self) -> u64 {
@@ -638,10 +581,9 @@ pub mod test_tseries_family {
 
     use crate::file_utils::make_tsm_file;
     use crate::kv_option::Options;
-    use crate::summary::{CompactMeta, VersionEdit};
     use crate::tsfamily::column_file::ColumnFile;
     use crate::tsfamily::level_info::LevelInfo;
-    use crate::tsfamily::version::Version;
+    use crate::tsfamily::version::{CompactMeta, Version, VersionEdit};
 
     #[tokio::test]
     async fn test_version_apply_version_edits_1() {

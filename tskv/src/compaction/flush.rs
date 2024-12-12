@@ -14,7 +14,7 @@ use crate::error::TskvResult;
 use crate::file_system::async_filesystem::LocalFileSystem;
 use crate::file_utils::make_delta_file;
 use crate::mem_cache::memcache::{MemCache, MemCacheSeriesScanIterator};
-use crate::summary::{CompactMeta, VersionEdit};
+use crate::tsfamily::version::{CompactMeta, VersionEdit};
 use crate::tsm::writer::TsmWriter;
 use crate::{ColumnFileId, VnodeId};
 

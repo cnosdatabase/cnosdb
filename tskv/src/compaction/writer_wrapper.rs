@@ -3,20 +3,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use models::codec::Encoding;
+use utils::id_generator::IDGenerator;
 use utils::BloomFilter;
 
 use crate::compaction::{CompactReq, CompactTask, CompactingBlock};
-use crate::context::GlobalContext;
-use crate::summary::CompactMeta;
+use crate::tsfamily::version::CompactMeta;
 use crate::tsm::writer::TsmWriter;
 use crate::{ColumnFileId, LevelId, TskvResult, VersionEdit};
 
 pub struct WriterWrapper {
     // Init values.
-    context: Arc<GlobalContext>,
     compact_task: CompactTask,
     out_level: LevelId,
     tsm_dir: PathBuf,
+    file_id: IDGenerator,
 
     max_level_ts: i64,
 
@@ -30,16 +30,16 @@ pub struct WriterWrapper {
 }
 
 impl WriterWrapper {
-    pub async fn new(request: &CompactReq, context: Arc<GlobalContext>) -> TskvResult<Self> {
+    pub async fn new(request: &CompactReq) -> TskvResult<Self> {
         let vnode_id = request.compact_task.vnode_id();
         let storage_opt = request.version.storage_opt();
         let tsm_dir = storage_opt.tsm_dir(request.version.owner().as_str(), vnode_id);
         let tsm_meta_compress = storage_opt.tsm_meta_compress;
         Ok(Self {
-            context,
             compact_task: request.compact_task,
             out_level: request.out_level,
             tsm_dir,
+            file_id: request.file_id.clone(),
             max_level_ts: request.version.max_level_ts(),
 
             tsm_writer: None,
@@ -84,7 +84,7 @@ impl WriterWrapper {
 
     pub async fn writer(&mut self) -> TskvResult<&mut TsmWriter> {
         if self.tsm_writer.is_none() {
-            let file_id = self.context.file_id_next();
+            let file_id = self.file_id.next_id();
             let tsm_writer =
                 TsmWriter::open(&self.tsm_dir, file_id, 0, false, self.tsm_meta_compress).await?;
             trace::info!(

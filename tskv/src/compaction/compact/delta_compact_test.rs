@@ -8,6 +8,7 @@ use models::codec::Encoding;
 use models::predicate::domain::TimeRanges;
 use models::schema::tskv_table_schema::{ColumnType, TableColumn, TskvTableSchema};
 use models::{Timestamp, ValueType};
+use utils::id_generator::IDGenerator;
 
 use super::test::*;
 use super::*;
@@ -31,7 +32,7 @@ async fn test_big_delta_compaction() {
 
     let delta_dir = opt.storage.delta_dir(&tenant_database, 1);
     #[rustfmt::skip]
-        let (compact_req, kernel) = prepare_delta_compaction(
+        let compact_req= prepare_delta_compaction(
         tenant_database,
         opt,
         5,
@@ -46,11 +47,10 @@ async fn test_big_delta_compaction() {
         1,
         0,
     );
-    let (version_edit, _) =
-        run_delta_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_delta_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     println!("{version_edit}");
 }
 
@@ -64,7 +64,7 @@ pub fn prepare_delta_compaction(
     out_time_range: TimeRange,
     out_level: LevelId,
     out_level_max_ts: Timestamp,
-) -> (CompactReq, Arc<GlobalContext>) {
+) -> CompactReq {
     let vnode_id = 1;
     let version = Arc::new(Version::new(
         vnode_id,
@@ -77,18 +77,16 @@ pub fn prepare_delta_compaction(
     ));
     let mut files = delta_files;
     files.extend_from_slice(&tsm_files);
-    let compact_req = CompactReq {
+
+    CompactReq {
         compact_task: CompactTask::Delta(vnode_id),
         version,
         files,
         in_level: 0,
         out_level,
         out_time_range,
-    };
-    let context = Arc::new(GlobalContext::new());
-    context.set_file_id(next_file_id);
-
-    (compact_req, context)
+        file_id: IDGenerator::new(next_file_id),
+    }
 }
 
 #[tokio::test]
@@ -185,7 +183,7 @@ async fn test_delta_compaction_1() {
     let max_level_ts = 9;
 
     let (next_file_id, files) = write_data_blocks_to_column_file(&dir, data, schema, 0).await;
-    let (compact_req, kernel) = prepare_delta_compaction(
+    let compact_req = prepare_delta_compaction(
         tenant_database,
         opt,
         next_file_id,
@@ -196,11 +194,10 @@ async fn test_delta_compaction_1() {
         max_level_ts,
     );
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_delta_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_delta_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -329,7 +326,7 @@ async fn test_delta_compaction_2() {
     let max_level_ts = 9;
 
     let (next_file_id, files) = write_data_blocks_to_column_file(&dir, data, schema, 0).await;
-    let (compact_req, kernel) = prepare_delta_compaction(
+    let compact_req = prepare_delta_compaction(
         tenant_database,
         opt,
         next_file_id,
@@ -340,11 +337,10 @@ async fn test_delta_compaction_2() {
         max_level_ts,
     );
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_delta_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_delta_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -445,7 +441,7 @@ async fn test_delta_compaction_3() {
             .unwrap();
         tsm_tombstone.flush().await.unwrap();
     }
-    let (compact_req, kernel) = prepare_delta_compaction(
+    let compact_req = prepare_delta_compaction(
         tenant_database,
         opt,
         next_file_id,
@@ -456,11 +452,10 @@ async fn test_delta_compaction_3() {
         max_level_ts,
     );
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_delta_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_delta_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -531,7 +526,7 @@ async fn test_delta_compaction(
         )));
     }
 
-    let (mut compact_req, kernel) = prepare_delta_compaction(
+    let mut compact_req = prepare_delta_compaction(
         tenant_database,
         opt,
         5,
@@ -544,11 +539,10 @@ async fn test_delta_compaction(
     compact_req.in_level = 0;
     compact_req.out_level = expected_data_level;
 
-    let (version_edit, _) =
-        run_delta_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .expect("Delta compaction sucessfully generated some new files");
+    let (version_edit, _) = run_delta_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .expect("Delta compaction sucessfully generated some new files");
 
     check_column_file(
         tsm_dir,

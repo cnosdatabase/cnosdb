@@ -6,10 +6,10 @@ use models::{SeriesId, Timestamp};
 use tokio::sync::RwLock as TokioRwLock;
 use utils::BloomFilter;
 
+use super::version::CompactMeta;
 use crate::error::TskvResult;
 use crate::file_utils::{make_delta_file, make_tsm_file};
 use crate::kv_option::StorageOptions;
-use crate::summary::CompactMeta;
 use crate::tsfamily::column_file::ColumnFile;
 use crate::tsm::reader::TsmReader;
 

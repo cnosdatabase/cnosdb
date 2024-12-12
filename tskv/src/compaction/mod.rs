@@ -12,6 +12,7 @@ mod writer_wrapper;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ::utils::id_generator::IDGenerator;
 use ::utils::BloomFilter;
 #[cfg(test)]
 pub use compact::test::create_options;
@@ -22,7 +23,6 @@ pub use picker::*;
 use tokio::sync::RwLock;
 
 use crate::compaction::metrics::VnodeCompactionMetrics;
-use crate::context::GlobalContext;
 use crate::index::ts_index::TSIndex;
 use crate::tsfamily::column_file::ColumnFile;
 use crate::tsfamily::tseries_family::TseriesFamily;
@@ -82,6 +82,7 @@ impl std::fmt::Display for CompactTask {
 pub struct CompactReq {
     compact_task: CompactTask,
 
+    file_id: IDGenerator,
     version: Arc<Version>,
     files: Vec<Arc<ColumnFile>>,
     in_level: LevelId,
@@ -102,6 +103,10 @@ impl CompactReq {
             }
         }
         (delta_files, level_files)
+    }
+
+    pub fn set_file_id(&mut self, file_id: IDGenerator) {
+        self.file_id = file_id;
     }
 }
 
@@ -142,13 +147,12 @@ impl std::fmt::Display for CompactReq {
 
 pub async fn run_compaction_job(
     request: CompactReq,
-    ctx: Arc<GlobalContext>,
     metrics: VnodeCompactionMetrics,
 ) -> TskvResult<Option<(VersionEdit, HashMap<ColumnFileId, Arc<BloomFilter>>)>> {
     if request.in_level == 0 {
-        run_delta_compaction_job(request, ctx, metrics).await
+        run_delta_compaction_job(request, metrics).await
     } else {
-        run_normal_compaction_job(request, ctx, metrics).await
+        run_normal_compaction_job(request, metrics).await
     }
 }
 
@@ -183,6 +187,7 @@ pub mod test {
     use cache::ShardedAsyncCache;
     use models::codec::Encoding;
     use models::predicate::domain::TimeRange;
+    use utils::id_generator::IDGenerator;
 
     use crate::compaction::compact::test::create_options;
     use crate::compaction::{CompactReq, CompactTask};
@@ -472,6 +477,7 @@ pub mod test {
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let files = version.levels_info()[0].files.clone();
             let req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files,
@@ -507,6 +513,7 @@ pub mod test {
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let files = version.levels_info()[0].files.clone();
             let req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files,
@@ -542,6 +549,7 @@ pub mod test {
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let files = version.levels_info()[0].files.clone();
             let req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files,
@@ -576,6 +584,7 @@ pub mod test {
                 .add(2, FileSketch(3, (1, 10), 10, false));
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let mut req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files: vec![],
@@ -618,6 +627,7 @@ pub mod test {
                 .add(0, FileSketch(2, (16, 20), 10, false));
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let mut req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files: vec![],
@@ -656,6 +666,7 @@ pub mod test {
                 .add(2, FileSketch(4, (6, 10), 5, false));
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let mut req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Delta(1),
                 version: Arc::new(version),
                 files: vec![],
@@ -699,6 +710,7 @@ pub mod test {
                 .add(1, FileSketch(2, (16, 20), 10, false));
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let mut req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Normal(1),
                 version: Arc::new(version),
                 files: vec![],
@@ -720,6 +732,7 @@ pub mod test {
                 .add(2, FileSketch(4, (6, 10), 5, false));
             let version = version_sketch.to_version(opt.storage.clone()).await;
             let mut req = CompactReq {
+                file_id: IDGenerator::new(1),
                 compact_task: CompactTask::Normal(1),
                 version: Arc::new(version),
                 files: vec![],

@@ -484,10 +484,6 @@ impl Coordinator for CoordService {
         self.meta.clone()
     }
 
-    fn store_engine(&self) -> Option<EngineRef> {
-        self.kv_inst.clone()
-    }
-
     fn raft_manager(&self) -> Arc<RaftNodesManager> {
         self.raft_manager.clone()
     }

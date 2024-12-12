@@ -9,11 +9,11 @@ use models::codec::Encoding;
 use models::predicate::domain::TimeRange;
 use models::schema::tskv_table_schema::{ColumnType, TableColumn, TskvTableSchema};
 use models::{Timestamp, ValueType};
+use utils::id_generator::IDGenerator;
 
 use super::test::*;
 use super::*;
 use crate::compaction::CompactTask;
-use crate::context::GlobalContext;
 use crate::file_system::async_filesystem::LocalFileSystem;
 use crate::file_system::FileSystem;
 use crate::kv_option::Options;
@@ -33,7 +33,7 @@ async fn test_big_compaction() {
 
     let tsm_dir = opt.storage.tsm_dir(&tenant_database, 1);
     #[rustfmt::skip]
-        let (compact_req, kernel) = prepare_compaction(
+        let compact_req = prepare_compaction(
         tenant_database,
         opt,
         5,
@@ -43,11 +43,10 @@ async fn test_big_compaction() {
         ],
         1,
     );
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     println!("{version_edit}");
 }
 
@@ -57,7 +56,7 @@ pub fn prepare_compaction(
     next_file_id: ColumnFileId,
     files: Vec<Arc<ColumnFile>>,
     max_level_ts: Timestamp,
-) -> (CompactReq, Arc<GlobalContext>) {
+) -> CompactReq {
     let vnode_id = 1;
     let version = Arc::new(Version::new(
         vnode_id,
@@ -68,18 +67,16 @@ pub fn prepare_compaction(
         max_level_ts,
         Arc::new(ShardedAsyncCache::create_lru_sharded_cache(1)),
     ));
-    let compact_req = CompactReq {
+
+    CompactReq {
         compact_task: CompactTask::Normal(vnode_id),
         version,
         files,
         in_level: 1,
         out_level: 2,
         out_time_range: TimeRange::all(),
-    };
-    let context = Arc::new(GlobalContext::new());
-    context.set_file_id(next_file_id);
-
-    (compact_req, context)
+        file_id: IDGenerator::new(next_file_id),
+    }
 }
 
 /// Test compaction with ordered data.
@@ -177,14 +174,12 @@ async fn test_compaction_fast() {
     let max_level_ts = 9;
 
     let (next_file_id, files) = write_data_blocks_to_column_file(&dir, data, schema, 2).await;
-    let (compact_req, kernel) =
-        prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
+    let compact_req = prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -282,14 +277,12 @@ async fn test_compaction_1() {
     let max_level_ts = 9;
 
     let (next_file_id, files) = write_data_blocks_to_column_file(&dir, data, schema, 2).await;
-    let (compact_req, kernel) =
-        prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
+    let compact_req = prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -418,14 +411,12 @@ async fn test_compaction_2() {
     let max_level_ts = 9;
 
     let (next_file_id, files) = write_data_blocks_to_column_file(&dir, data, schema, 2).await;
-    let (compact_req, kernel) =
-        prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
+    let compact_req = prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -524,14 +515,12 @@ async fn test_compaction_3() {
             .unwrap();
         tsm_tombstone.flush().await.unwrap();
     }
-    let (compact_req, kernel) =
-        prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
+    let compact_req = prepare_compaction(tenant_database, opt, next_file_id, files, max_level_ts);
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
 
@@ -903,7 +892,7 @@ async fn test_big_compaction_1() {
     }
     let next_file_id = 4_u64;
 
-    let (compact_req, kernel) = prepare_compaction(
+    let compact_req = prepare_compaction(
         tenant_database,
         opt,
         next_file_id,
@@ -911,11 +900,10 @@ async fn test_big_compaction_1() {
         max_level_ts,
     );
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
 
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }
@@ -1305,7 +1293,7 @@ async fn test_big_compaction_2() {
         )));
     }
     let next_file_id = 4_u64;
-    let (compact_req, kernel) = prepare_compaction(
+    let compact_req = prepare_compaction(
         tenant_database,
         opt,
         next_file_id,
@@ -1313,11 +1301,10 @@ async fn test_big_compaction_2() {
         max_level_ts,
     );
     let out_level = compact_req.out_level;
-    let (version_edit, _) =
-        run_normal_compaction_job(compact_req, kernel, VnodeCompactionMetrics::fake())
-            .await
-            .unwrap()
-            .unwrap();
+    let (version_edit, _) = run_normal_compaction_job(compact_req, VnodeCompactionMetrics::fake())
+        .await
+        .unwrap()
+        .unwrap();
 
     check_column_file(dir, version_edit, expected_data, out_level).await;
 }

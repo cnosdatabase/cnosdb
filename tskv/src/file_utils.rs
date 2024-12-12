@@ -30,6 +30,11 @@ pub fn make_summary_file_tmp(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(p)
 }
 
+/// Make a path for summary file by it's directory and id.
+pub fn make_tsfamily_summary_file(dir: impl AsRef<Path>) -> PathBuf {
+    dir.as_ref().join("summary")
+}
+
 /// Check a summary file's name.
 pub fn check_summary_file_name(file_name: &str) -> bool {
     SUMMARY_FILE_NAME_PATTERN.is_match(file_name)

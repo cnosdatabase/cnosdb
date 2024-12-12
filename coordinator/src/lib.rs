@@ -23,7 +23,6 @@ use raft::writer::TskvRaftWriter;
 use snafu::ResultExt;
 use trace::SpanContext;
 use tskv::reader::QueryOption;
-use tskv::EngineRef;
 use utils::precision::Precision;
 
 use crate::errors::{CoordinatorResult, MetaSnafu};
@@ -57,7 +56,6 @@ pub enum ReplicationCmdType {
 pub trait Coordinator: Send + Sync {
     fn node_id(&self) -> u64;
     fn meta_manager(&self) -> MetaRef;
-    fn store_engine(&self) -> Option<EngineRef>;
     fn raft_manager(&self) -> Arc<RaftNodesManager>;
     async fn tenant_meta(&self, tenant: &str) -> Option<MetaClientRef>;
 

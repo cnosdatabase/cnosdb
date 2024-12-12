@@ -21,9 +21,8 @@ use crate::compaction::metrics::DurationMetricRecorder;
 use crate::compaction::utils::filter_record_batch_by_time_range;
 use crate::compaction::writer_wrapper::WriterWrapper;
 use crate::compaction::CompactReq;
-use crate::context::GlobalContext;
 use crate::error::{ArrowSnafu, CommonSnafu, TskvResult};
-use crate::summary::{CompactMeta, VersionEdit};
+use crate::tsfamily::version::{CompactMeta, VersionEdit};
 use crate::tsm::chunk::Chunk;
 use crate::tsm::page::Page;
 use crate::tsm::reader::{decode_pages, decode_pages_buf, TsmReader};
@@ -508,7 +507,6 @@ impl CompactState {
 
 pub async fn run_normal_compaction_job(
     request: CompactReq,
-    ctx: Arc<GlobalContext>,
     metrics: VnodeCompactionMetrics,
 ) -> TskvResult<Option<(VersionEdit, HashMap<ColumnFileId, Arc<BloomFilter>>)>> {
     info!(
@@ -533,7 +531,7 @@ pub async fn run_normal_compaction_job(
     }
 
     let (mut version_edit, file_metas) =
-        compact_files(request, ctx, tsm_readers, TimeRange::all(), metrics).await?;
+        compact_files(request, tsm_readers, TimeRange::all(), metrics).await?;
 
     // Level 0 files that can be deleted after compaction.
     version_edit.del_files = tsm_file_metas_will_delete;
@@ -544,7 +542,6 @@ pub async fn run_normal_compaction_job(
 
 pub async fn run_delta_compaction_job(
     request: CompactReq,
-    ctx: Arc<GlobalContext>,
     metrics: VnodeCompactionMetrics,
 ) -> TskvResult<Option<(VersionEdit, HashMap<ColumnFileId, Arc<BloomFilter>>)>> {
     info!(
@@ -593,7 +590,7 @@ pub async fn run_delta_compaction_job(
     }
 
     let (mut version_edit, file_metas) =
-        compact_files(request, ctx, tsm_readers, out_time_range, metrics).await?;
+        compact_files(request, tsm_readers, out_time_range, metrics).await?;
 
     // Level 0 files that can be deleted after compaction.
     version_edit.del_files = l0_file_metas_will_delete;
@@ -610,14 +607,13 @@ pub async fn run_delta_compaction_job(
 
 async fn compact_files(
     request: CompactReq,
-    ctx: Arc<GlobalContext>,
     tsm_readers: Vec<Arc<TsmReader>>,
     out_time_range: TimeRange,
     mut metrics: VnodeCompactionMetrics,
 ) -> TskvResult<(VersionEdit, HashMap<ColumnFileId, Arc<BloomFilter>>)> {
     let max_block_size = request.version.storage_opt().max_datablock_size as usize;
     let mut state = CompactState::new(tsm_readers, out_time_range);
-    let mut writer_wrapper = WriterWrapper::new(&request, ctx.clone()).await?;
+    let mut writer_wrapper = WriterWrapper::new(&request).await?;
 
     let mut previous_merged_block = Option::<CompactingBlock>::None;
     let mut merging_blk_meta_groups = Vec::with_capacity(32);
@@ -715,8 +711,8 @@ pub mod test {
     use crate::file_system::async_filesystem::LocalFileSystem;
     use crate::file_system::FileSystem;
     use crate::kv_option::Options;
-    use crate::summary::VersionEdit;
     use crate::tsfamily::column_file::ColumnFile;
+    use crate::tsfamily::version::VersionEdit;
     use crate::tsm::reader::TsmReader;
     use crate::tsm::writer::TsmWriter;
     use crate::{file_utils, LevelId};

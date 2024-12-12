@@ -17,6 +17,7 @@ use crate::schema::error::{ColumnTypeSnafu, SchemaResult};
 #[derive(Debug)]
 pub struct DBschemas {
     meta: MetaRef,
+    db_schema: DatabaseSchema,
     tenant_name: String,
     database_name: String,
 }
@@ -36,6 +37,7 @@ impl DBschemas {
 
         Ok(Self {
             meta,
+            db_schema: db_schema.clone(),
             tenant_name: db_schema.tenant_name().to_string(),
             database_name: db_schema.database_name().to_string(),
         })
@@ -47,6 +49,10 @@ impl DBschemas {
 
     pub fn tenant_name(&self) -> &str {
         &self.tenant_name
+    }
+
+    pub fn db_schema(&self) -> &DatabaseSchema {
+        &self.db_schema
     }
 
     async fn tenant_meta(&self) -> SchemaResult<MetaClientRef> {
@@ -84,7 +90,7 @@ impl DBschemas {
                     fb_schema.table.to_string(),
                     vec![],
                 );
-                let db_schema = self.db_schema().await?;
+                let db_schema = self.db_schema_by_meta().await?;
                 let precision = db_schema.config.precision();
                 schema.add_column(TableColumn::new_time_column(
                     schema.next_column_id(),
@@ -229,7 +235,7 @@ impl DBschemas {
         Ok(())
     }
 
-    pub async fn db_schema(&self) -> SchemaResult<DatabaseSchema> {
+    pub async fn db_schema_by_meta(&self) -> SchemaResult<DatabaseSchema> {
         let db_schema = self
             .tenant_meta()
             .await?

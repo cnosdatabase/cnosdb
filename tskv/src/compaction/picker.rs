@@ -1,9 +1,11 @@
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::u64;
 
 use models::predicate::domain::TimeRange;
 use tokio::sync::RwLockWriteGuard;
 use trace::{debug, error, info};
+use utils::id_generator::IDGenerator;
 
 use super::CompactTask;
 use crate::compaction::CompactReq;
@@ -95,6 +97,7 @@ impl LevelCompactionPicker {
             in_level,
             out_level,
             out_time_range: TimeRange::all(),
+            file_id: IDGenerator::new(u64::MAX),
         })
     }
 
@@ -380,6 +383,7 @@ impl DeltaCompactionPicker {
                         in_level: 0,
                         out_level: 1,
                         out_time_range: picked_time_range,
+                        file_id: IDGenerator::new(u64::MAX),
                     });
                 }
                 continue;
@@ -447,6 +451,7 @@ impl DeltaCompactionPicker {
                                 // One delta-file and one level-file, the out_time_range is
                                 // the time range of the level-file.
                                 out_time_range: *lv_file.time_range(),
+                                file_id: IDGenerator::new(u64::MAX),
                             });
                         }
                     }
@@ -461,6 +466,7 @@ impl DeltaCompactionPicker {
                             in_level: 0,
                             out_level: lv.level(),
                             out_time_range,
+                            file_id: IDGenerator::new(u64::MAX),
                         });
                     }
                 }
@@ -477,6 +483,7 @@ impl DeltaCompactionPicker {
                     in_level: 0,
                     out_level: advised_out_level,
                     out_time_range: l0_file_remained_tr_first,
+                    file_id: IDGenerator::new(u64::MAX),
                 });
             }
         }

@@ -12,10 +12,10 @@ use tokio::sync::{RwLock as AsyncRwLock, RwLockWriteGuard as AsyncRwLockWriteGua
 use trace::{debug, error, info};
 use utils::BloomFilter;
 
+use super::version::CompactMeta;
 use crate::error::{FileSystemSnafu, TskvResult};
 use crate::file_system::async_filesystem::{LocalFileSystem, LocalFileType};
 use crate::file_system::FileSystem;
-use crate::summary::CompactMeta;
 use crate::tsm::reader::TsmReader;
 use crate::tsm::tombstone::tombstone_compact_tmp_path;
 use crate::tsm::writer::TsmWriter;
