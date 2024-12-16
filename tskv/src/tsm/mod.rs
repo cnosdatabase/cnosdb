@@ -3,7 +3,6 @@ pub mod chunk_group;
 pub mod codec;
 pub mod column_group;
 pub mod footer;
-pub mod mutable_column;
 pub mod mutable_column_ref;
 pub mod page;
 pub mod reader;

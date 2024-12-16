@@ -291,7 +291,7 @@ fn next_value(buf: &str) -> Option<(&str, usize)> {
 #[cfg(test)]
 mod test {
     use crate::line_protocol::parser::Parser;
-    use crate::lines_convert::{line_to_batches, mutable_batches_to_point};
+    use crate::lines_convert::line_to_point;
 
     #[test]
     #[ignore]
@@ -305,11 +305,7 @@ mod test {
         println!("parse lines: {} elapsed: {:?}", lines.len(), t.elapsed());
 
         let t = std::time::Instant::now();
-        let batch = line_to_batches(&lines).unwrap();
-        println!("line_to_batches elapsed: {:?}", t.elapsed());
-
-        let t = std::time::Instant::now();
-        let flatbuf = mutable_batches_to_point("test_db_12345678", batch);
+        let flatbuf = line_to_point(&lines, "test_db_12345678").unwrap();
         println!("to flatbuf: {} elapsed: {:?}", flatbuf.len(), t.elapsed());
     }
 }

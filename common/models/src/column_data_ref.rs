@@ -1,9 +1,40 @@
 use arrow_buffer::builder::BooleanBufferBuilder;
+use snafu::{Backtrace, Location, Snafu};
 
-use crate::column_data::{ColumnDataResult, DataTypeMissMatchSnafu, UnsupportedDataTypeSnafu};
 use crate::field_value::FieldVal;
 use crate::PhysicalDType;
 
+pub type ColumnDataResult<T, E = ColumnDataError> = Result<T, E>;
+
+#[derive(Snafu, Debug)]
+#[snafu(visibility(pub))]
+pub enum ColumnDataError {
+    #[snafu(display("Unsupport data type: {}", dt))]
+    UnsupportedDataType {
+        dt: String,
+        location: Location,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Data type miss match: column type: {:?}, field_val: {:?}",
+        column_type,
+        field_val
+    ))]
+    DataTypeMissMatch {
+        column_type: PhysicalDType,
+        field_val: Option<FieldVal>,
+        location: Location,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("MutableColumnError: {}", msg))]
+    CommonError {
+        msg: String,
+        location: Location,
+        backtrace: Backtrace,
+    },
+}
 #[derive(Debug)]
 pub struct ColumnDataRef<'a> {
     pub valid: BooleanBufferBuilder,

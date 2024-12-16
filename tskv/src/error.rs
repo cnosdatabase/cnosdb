@@ -5,7 +5,7 @@ use datafusion::error::DataFusionError;
 use error_code::{ErrorCode, ErrorCoder};
 use http_protocol::response::ErrorResponse;
 use meta::error::MetaError;
-use models::column_data::ColumnDataError;
+use models::column_data_ref::ColumnDataError;
 use models::meta_data::VnodeId;
 use models::ModelError;
 use protos::PointsError;

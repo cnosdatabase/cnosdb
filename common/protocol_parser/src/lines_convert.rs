@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBufferBuilder, Float64Array, Int64Array, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
+    Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder,
+    Int64Array, Int64Builder, StringArray, StringBuilder, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array, UInt64Builder,
 };
-use datafusion::arrow::datatypes::{SchemaRef, TimeUnit};
+use datafusion::arrow::buffer::NullBuffer;
+use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::error::{ArrowError, Result as ArrowResult};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
-use models::column_data_ref::PrimaryColumnDataRef;
-use models::mutable_batch::MutableBatch;
 use models::schema::tskv_table_schema::{PhysicalCType, TskvTableSchemaRef};
 use models::PhysicalDType as ValueType;
 use protos::models::{
@@ -17,258 +19,329 @@ use protos::models::{
 
 use crate::{Error, FieldValue, Line, Result};
 
-pub fn line_to_batches<'a>(lines: &'a [Line<'a>]) -> Result<HashMap<String, MutableBatch<'a>>> {
-    let mut batches = HashMap::new();
-    for line in lines.iter() {
-        let batch = match batches.get_mut(line.table.as_ref()) {
-            Some(b) => b,
-            None => batches
-                .entry(line.table.to_string())
-                .or_insert_with(MutableBatch::new),
-        };
-        let row_count = batch.row_count;
-        for (tag_key, tag_value) in line.tags.iter() {
-            let col = batch
-                .column_mut(tag_key, PhysicalCType::Tag)
-                .map_err(|e| Error::Common {
-                    content: format!("Error getting column: {}", e),
-                })?;
-            match &mut col.column_data.primary_data {
-                PrimaryColumnDataRef::String(data, ..) => {
-                    data.resize(row_count + 1, "".as_bytes());
-                    data[row_count] = tag_value.as_bytes();
-                    col.column_data
-                        .valid
-                        .append_n(row_count - col.column_data.valid.len(), false);
-                    col.column_data.valid.append(true);
+struct TableData {
+    times: Int64Builder,
+    tags: HashMap<String, StringBuilder>,
+    fields: HashMap<String, FieldBuilder>,
+    row_count: usize,
+}
+
+enum FieldBuilder {
+    U64(UInt64Builder),
+    I64(Int64Builder),
+    F64(Float64Builder),
+    String(StringBuilder),
+    Bool(BooleanBuilder),
+}
+
+impl FieldBuilder {
+    fn append_option(&mut self, value: Option<&FieldValue>) -> ArrowResult<()> {
+        match (&mut *self, value) {
+            (FieldBuilder::U64(builder), Some(FieldValue::U64(v))) => {
+                builder.append_value(*v);
+                Ok(())
+            }
+            (FieldBuilder::I64(builder), Some(FieldValue::I64(v))) => {
+                builder.append_value(*v);
+                Ok(())
+            }
+            (FieldBuilder::F64(builder), Some(FieldValue::F64(v))) => {
+                builder.append_value(*v);
+                Ok(())
+            }
+            (FieldBuilder::String(builder), Some(FieldValue::Str(v))) => {
+                match std::str::from_utf8(v) {
+                    Ok(s) => {
+                        builder.append_value(s);
+                        Ok(())
+                    }
+                    Err(_) => Err(ArrowError::InvalidArgumentError(
+                        "Invalid string value".to_string(),
+                    )),
+                }
+            }
+            (FieldBuilder::Bool(builder), Some(FieldValue::Bool(v))) => {
+                builder.append_value(*v);
+                Ok(())
+            }
+            (_, None) => match self {
+                FieldBuilder::U64(ref mut builder) => {
+                    builder.append_null();
+                    Ok(())
+                }
+                FieldBuilder::I64(ref mut builder) => {
+                    builder.append_null();
+                    Ok(())
+                }
+                FieldBuilder::F64(ref mut builder) => {
+                    builder.append_null();
+                    Ok(())
+                }
+                FieldBuilder::String(ref mut builder) => {
+                    builder.append_null();
+                    Ok(())
+                }
+                FieldBuilder::Bool(ref mut builder) => {
+                    builder.append_null();
+                    Ok(())
+                }
+            },
+            _ => Err(ArrowError::InvalidArgumentError(
+                "Type mismatch between builder and value".to_string(),
+            )),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            FieldBuilder::U64(b) => b.len(),
+            FieldBuilder::I64(b) => b.len(),
+            FieldBuilder::F64(b) => b.len(),
+            FieldBuilder::String(b) => b.len(),
+            FieldBuilder::Bool(b) => b.len(),
+        }
+    }
+}
+
+struct ColumnInfo {
+    array: ArrayRef,
+    name: String,
+    field_type: FieldType,
+    column_type: FbColumnType,
+}
+
+impl TableData {
+    fn new() -> Self {
+        Self {
+            times: Int64Builder::new(),
+            tags: HashMap::new(),
+            fields: HashMap::new(),
+            row_count: 0,
+        }
+    }
+
+    fn add_line(&mut self, line: &Line) -> ArrowResult<()> {
+        self.times.append_value(line.timestamp);
+
+        for (tag_key, tag_value) in &line.tags {
+            let builder = self.tags.entry(tag_key.to_string()).or_default();
+            while builder.len() < self.row_count {
+                builder.append_null();
+            }
+            builder.append_value(tag_value);
+        }
+
+        for (field_key, field_value) in &line.fields {
+            let builder =
+                self.fields
+                    .entry(field_key.to_string())
+                    .or_insert_with(|| match field_value {
+                        FieldValue::U64(_) => FieldBuilder::U64(UInt64Builder::new()),
+                        FieldValue::I64(_) => FieldBuilder::I64(Int64Builder::new()),
+                        FieldValue::F64(_) => FieldBuilder::F64(Float64Builder::new()),
+                        FieldValue::Str(_) => FieldBuilder::String(StringBuilder::new()),
+                        FieldValue::Bool(_) => FieldBuilder::Bool(BooleanBuilder::new()),
+                    });
+            while builder.len() < self.row_count {
+                builder.append_option(None)?;
+            }
+            builder.append_option(Some(field_value))?;
+        }
+
+        self.row_count += 1;
+
+        for tag_builder in self.tags.values_mut() {
+            while tag_builder.len() < self.row_count {
+                tag_builder.append_null();
+            }
+        }
+        for field_builder in self.fields.values_mut() {
+            while field_builder.len() < self.row_count {
+                field_builder.append_option(None)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Vec<ColumnInfo>, ArrowError> {
+        let mut columns = Vec::new();
+
+        columns.push(ColumnInfo {
+            array: Arc::new(self.times.finish()),
+            name: "time".to_string(),
+            field_type: FieldType::Integer,
+            column_type: FbColumnType::Time,
+        });
+
+        let mut tags: Vec<_> = self.tags.into_iter().collect();
+        tags.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (name, mut builder) in tags {
+            columns.push(ColumnInfo {
+                array: Arc::new(builder.finish()),
+                name,
+                field_type: FieldType::String,
+                column_type: FbColumnType::Tag,
+            });
+        }
+
+        let mut fields: Vec<_> = self.fields.into_iter().collect();
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (name, mut builder) in fields {
+            let (field_type, array) = match &mut builder {
+                FieldBuilder::U64(b) => (FieldType::Unsigned, Arc::new(b.finish()) as ArrayRef),
+                FieldBuilder::I64(b) => (FieldType::Integer, Arc::new(b.finish()) as ArrayRef),
+                FieldBuilder::F64(b) => (FieldType::Float, Arc::new(b.finish()) as ArrayRef),
+                FieldBuilder::String(b) => (FieldType::String, Arc::new(b.finish()) as ArrayRef),
+                FieldBuilder::Bool(b) => (FieldType::Boolean, Arc::new(b.finish()) as ArrayRef),
+            };
+            columns.push(ColumnInfo {
+                array,
+                name,
+                field_type,
+                column_type: FbColumnType::Field,
+            });
+        }
+
+        Ok(columns)
+    }
+}
+
+pub fn line_to_point(lines: &[Line], db: &str) -> Result<Vec<u8>, Error> {
+    let fbb = &mut FlatBufferBuilder::new();
+    let mut tables_map = HashMap::new();
+    for line in lines {
+        let table_data = tables_map
+            .entry(line.table.to_string())
+            .or_insert_with(TableData::new);
+
+        table_data.add_line(line).map_err(|e| Error::Common {
+            content: format!("Failed to add line: {}", e),
+        })?;
+    }
+
+    let mut fb_tables = Vec::new();
+    for (table_name, table_data) in tables_map {
+        let row_count = table_data.row_count;
+        let columns = table_data.finish().map_err(|e| Error::Common {
+            content: format!("Failed to finish table: {}", e),
+        })?;
+
+        let mut fb_columns = Vec::new();
+        for column in columns {
+            let column_name = fbb.create_string(column.name.as_str());
+
+            let nulls = column.array.nulls();
+            let nullbits = match nulls {
+                Some(nulls) => nulls.buffer().as_slice().to_vec(),
+                None => {
+                    let nullbits = NullBuffer::new_valid(column.array.len());
+                    nullbits.buffer().as_slice().to_vec()
+                }
+            };
+            let nullbits = fbb.create_vector(&nullbits);
+            let column_values = match column.array.data_type() {
+                DataType::UInt64 => {
+                    let values = column
+                        .array
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .ok_or_else(|| Error::Common {
+                            content: "Failed to downcast to UInt64Array".to_string(),
+                        })?;
+                    let col_values: Vec<u64> = values.iter().map(|v| v.unwrap_or(0)).collect();
+                    let values = fbb.create_vector(&col_values);
+                    let mut values_builder = ValuesBuilder::new(fbb);
+                    values_builder.add_uint_value(values);
+                    values_builder.finish()
+                }
+                DataType::Int64 => {
+                    let values = column
+                        .array
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| Error::Common {
+                            content: "Failed to downcast to Int64Array".to_string(),
+                        })?;
+                    let col_values: Vec<i64> = values.iter().map(|v| v.unwrap_or(0)).collect();
+                    let values = fbb.create_vector(&col_values);
+                    let mut values_builder = ValuesBuilder::new(fbb);
+                    values_builder.add_int_value(values);
+                    values_builder.finish()
+                }
+                DataType::Float64 => {
+                    let values = column
+                        .array
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or_else(|| Error::Common {
+                            content: "Failed to downcast to Float64Array".to_string(),
+                        })?;
+                    let col_values: Vec<f64> = values.iter().map(|v| v.unwrap_or(0.0)).collect();
+                    let values = fbb.create_vector(&col_values);
+                    let mut values_builder = ValuesBuilder::new(fbb);
+                    values_builder.add_float_value(values);
+                    values_builder.finish()
+                }
+                DataType::Utf8 => {
+                    let values = column
+                        .array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| Error::Common {
+                            content: "Failed to downcast to StringArray".to_string(),
+                        })?;
+                    let mut col_values = Vec::with_capacity(values.len());
+                    for value in values.iter() {
+                        let str_offset = if let Some(value) = value {
+                            fbb.create_string(value)
+                        } else {
+                            fbb.create_string("")
+                        };
+                        col_values.push(str_offset);
+                    }
+                    let values = fbb.create_vector(&col_values);
+                    let mut values_builder = ValuesBuilder::new(fbb);
+                    values_builder.add_string_value(values);
+                    values_builder.finish()
+                }
+                DataType::Boolean => {
+                    let values = column
+                        .array
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| Error::Common {
+                            content: "Failed to downcast to BooleanArray".to_string(),
+                        })?;
+                    let values: Vec<bool> = values.iter().map(|v| v.unwrap_or(false)).collect();
+                    let values = fbb.create_vector(&values);
+                    let mut values_builder = ValuesBuilder::new(fbb);
+                    values_builder.add_bool_value(values);
+                    values_builder.finish()
                 }
                 _ => {
                     return Err(Error::Common {
-                        content: "Expected string column".to_string(),
+                        content: "Unsupported data type".to_string(),
                     });
                 }
-            }
-        }
-        for (field_key, field_value) in line.fields.iter() {
-            match field_value {
-                FieldValue::U64(value) => {
-                    let col = batch
-                        .column_mut(field_key, PhysicalCType::Field(ValueType::Unsigned))
-                        .map_err(|e| Error::Common {
-                            content: format!("Error getting column: {}", e),
-                        })?;
-                    match &mut col.column_data.primary_data {
-                        PrimaryColumnDataRef::U64(data, ..) => {
-                            data.resize(row_count + 1, 0);
-                            data[row_count] = *value;
-                            col.column_data
-                                .valid
-                                .append_n(row_count - col.column_data.valid.len(), false);
-                            col.column_data.valid.append(true);
-                        }
-                        _ => {
-                            return Err(Error::Common {
-                                content: "Expected u64 column".to_string(),
-                            });
-                        }
-                    }
-                }
-                FieldValue::I64(value) => {
-                    let col = batch
-                        .column_mut(field_key, PhysicalCType::Field(ValueType::Integer))
-                        .map_err(|e| Error::Common {
-                            content: format!("Error getting column: {}", e),
-                        })?;
-                    match &mut col.column_data.primary_data {
-                        PrimaryColumnDataRef::I64(data, ..) => {
-                            data.resize(row_count + 1, 0);
-                            data[row_count] = *value;
-                            col.column_data
-                                .valid
-                                .append_n(row_count - col.column_data.valid.len(), false);
-                            col.column_data.valid.append(true);
-                        }
-                        _ => {
-                            return Err(Error::Common {
-                                content: "Expected i64 column".to_string(),
-                            });
-                        }
-                    }
-                }
-                FieldValue::Str(value) => {
-                    let col = batch
-                        .column_mut(field_key, PhysicalCType::Field(ValueType::String))
-                        .map_err(|e| Error::Common {
-                            content: format!("Error getting column: {}", e),
-                        })?;
-                    match &mut col.column_data.primary_data {
-                        PrimaryColumnDataRef::String(data, ..) => {
-                            data.resize(row_count + 1, "".as_bytes());
-                            data[row_count] = value;
-                            col.column_data
-                                .valid
-                                .append_n(row_count - col.column_data.valid.len(), false);
-                            col.column_data.valid.append(true);
-                        }
-                        _ => {
-                            return Err(Error::Common {
-                                content: "Expected string column".to_string(),
-                            });
-                        }
-                    }
-                }
-                FieldValue::F64(value) => {
-                    let col = batch
-                        .column_mut(field_key, PhysicalCType::Field(ValueType::Float))
-                        .map_err(|e| Error::Common {
-                            content: format!("Error getting column: {}", e),
-                        })?;
-                    match &mut col.column_data.primary_data {
-                        PrimaryColumnDataRef::F64(data, ..) => {
-                            data.resize(row_count + 1, 0.0);
-                            data[row_count] = *value;
-                            col.column_data
-                                .valid
-                                .append_n(row_count - col.column_data.valid.len(), false);
-                            col.column_data.valid.append(true);
-                        }
-                        _ => {
-                            return Err(Error::Common {
-                                content: "Expected f64 column".to_string(),
-                            });
-                        }
-                    }
-                }
-                FieldValue::Bool(value) => {
-                    let col = batch
-                        .column_mut(field_key, PhysicalCType::Field(ValueType::Boolean))
-                        .map_err(|e| Error::Common {
-                            content: format!("Error getting column: {}", e),
-                        })?;
-                    match &mut col.column_data.primary_data {
-                        PrimaryColumnDataRef::Bool(data, ..) => {
-                            data.resize(row_count + 1, false);
-                            data[row_count] = *value;
-                            col.column_data
-                                .valid
-                                .append_n(row_count - col.column_data.valid.len(), false);
-                            col.column_data.valid.append(true);
-                        }
-                        _ => {
-                            return Err(Error::Common {
-                                content: "Expected bool column".to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        let time = line.timestamp;
-        let col = batch
-            .column_mut("time", PhysicalCType::default_time())
-            .map_err(|e| Error::Common {
-                content: format!("Error getting column: {}", e),
-            })?;
-        match col.column_data.primary_data {
-            PrimaryColumnDataRef::I64(ref mut data, ..) => {
-                data.resize(row_count + 1, 0);
-                data[row_count] = time;
-                col.column_data
-                    .valid
-                    .append_n(row_count - col.column_data.valid.len(), false);
-                col.column_data.valid.append(true);
-            }
-            _ => {
-                return Err(Error::Common {
-                    content: "Expected i64 type as time column".to_string(),
-                });
-            }
-        }
-        batch.row_count += 1;
-    }
-
-    batches.iter_mut().for_each(|(_, batch)| {
-        batch.finish();
-    });
-    Ok(batches)
-}
-
-pub fn mutable_batches_to_point(db: &str, batches: HashMap<String, MutableBatch>) -> Vec<u8> {
-    let fbb = &mut FlatBufferBuilder::new();
-    let mut tables = Vec::with_capacity(batches.len());
-    for (table_name, table_batch) in batches {
-        let mut columns = Vec::with_capacity(table_batch.columns.len());
-        let mut columns_names = table_batch
-            .column_names
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect::<Vec<_>>();
-        columns_names.sort_by(|a, b| a.0.cmp(b.0));
-        for (field_name, field_idx) in columns_names {
-            let column = table_batch.columns.get(*field_idx).unwrap();
-            let fb_column_type = match column.column_type {
-                PhysicalCType::Tag => FbColumnType::Tag,
-                PhysicalCType::Field(_) => FbColumnType::Field,
-                PhysicalCType::Time(_) => FbColumnType::Time,
             };
-
-            let (field_type, values) = match column.column_data.primary_data {
-                PrimaryColumnDataRef::F64(ref values, ..) => {
-                    let values = fbb.create_vector(values);
-                    let mut values_builder = ValuesBuilder::new(fbb);
-                    values_builder.add_float_value(values);
-                    (FieldType::Float, values_builder.finish())
-                }
-                PrimaryColumnDataRef::I64(ref values, ..) => {
-                    let values = fbb.create_vector(values);
-                    let mut values_builder = ValuesBuilder::new(fbb);
-                    values_builder.add_int_value(values);
-                    (FieldType::Integer, values_builder.finish())
-                }
-                PrimaryColumnDataRef::U64(ref values, ..) => {
-                    let values = fbb.create_vector(values);
-                    let mut values_builder = ValuesBuilder::new(fbb);
-                    values_builder.add_uint_value(values);
-                    (FieldType::Unsigned, values_builder.finish())
-                }
-                PrimaryColumnDataRef::String(ref values, ..) => {
-                    let values = values
-                        .iter()
-                        .map(|s| fbb.create_string(std::str::from_utf8(s).unwrap()))
-                        .collect::<Vec<_>>();
-                    let values = fbb.create_vector(&values);
-                    let mut values_builder = ValuesBuilder::new(fbb);
-                    values_builder.add_string_value(values);
-                    (FieldType::String, values_builder.finish())
-                }
-                PrimaryColumnDataRef::Bool(ref values, ..) => {
-                    let values = fbb.create_vector(values);
-                    let mut values_builder = ValuesBuilder::new(fbb);
-                    values_builder.add_bool_value(values);
-                    (FieldType::Boolean, values_builder.finish())
-                }
-            };
-            let column_name = fbb.create_string(field_name);
-            let nullbits = fbb.create_vector(column.column_data.valid.as_slice());
             let mut column_builder = ColumnBuilder::new(fbb);
-            column_builder.add_field_type(field_type);
-            column_builder.add_column_type(fb_column_type);
+            column_builder.add_field_type(column.field_type);
+            column_builder.add_column_type(column.column_type);
             column_builder.add_name(column_name);
             column_builder.add_nullbits(nullbits);
-            column_builder.add_col_values(values);
-
-            columns.push(column_builder.finish());
+            column_builder.add_col_values(column_values);
+            fb_columns.push(column_builder.finish());
         }
-        let columns = fbb.create_vector(&columns);
+        let columns = fbb.create_vector(&fb_columns);
         let table_name = fbb.create_string(&table_name);
         let mut table_builder = TableBuilder::new(fbb);
         table_builder.add_columns(columns);
         table_builder.add_tab(table_name);
-        table_builder.add_num_rows(table_batch.row_count as u64);
-        tables.push(table_builder.finish());
+        table_builder.add_num_rows(row_count as u64);
+        fb_tables.push(table_builder.finish());
     }
-    let tables = fbb.create_vector(&tables);
+    let tables = fbb.create_vector(&fb_tables);
     let db = fbb.create_string(db);
     let mut point_builder = PointsBuilder::new(fbb);
     point_builder.add_tables(tables);
@@ -276,7 +349,7 @@ pub fn mutable_batches_to_point(db: &str, batches: HashMap<String, MutableBatch>
     let points = point_builder.finish();
     fbb.finish(points, None);
     let data = fbb.finished_data().to_vec();
-    data
+    Ok(data)
 }
 
 pub fn arrow_array_to_points(
@@ -349,19 +422,21 @@ pub fn build_string_column<'a>(
             content: format!("column {} is not string", col_name),
         })?;
 
-    let mut nullbits = BooleanBufferBuilder::new(array.len());
-    let mut col_values = Vec::with_capacity(array.len());
-    array.iter().enumerate().for_each(|(_, value)| {
-        if let Some(value) = value {
-            nullbits.append(true);
-            col_values.push(fbb.create_string(value));
-        } else {
-            nullbits.append(false);
-            col_values.push(fbb.create_string(""));
-        }
-    });
+    let col_values: Vec<_> = array
+        .iter()
+        .map(|value| fbb.create_string(value.unwrap_or("")))
+        .collect();
+    let nullbits = array
+        .nulls()
+        .map(|nulls| nulls.buffer().as_slice().to_vec())
+        .unwrap_or_else(|| {
+            NullBuffer::new_valid(array.len())
+                .buffer()
+                .as_slice()
+                .to_vec()
+        });
+    let nullbits = fbb.create_vector(&nullbits);
 
-    let nullbits = fbb.create_vector(nullbits.finish().values());
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_string_value(values);
@@ -382,7 +457,7 @@ pub fn build_timestamp_column<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
 ) -> Result<WIPOffset<FbColumn<'a>>> {
     let name = fbb.create_string(col_name);
-    let (mut nullbits, col_values) = match time_unit {
+    let (nullbits, col_values) = match time_unit {
         TimeUnit::Second => {
             return Err(Error::Common {
                 content: "time column not support second".to_string(),
@@ -395,17 +470,16 @@ pub fn build_timestamp_column<'a>(
                 .ok_or_else(|| Error::Common {
                     content: format!("column {} is not int64", col_name),
                 })?;
-            let mut nullbits = BooleanBufferBuilder::new(values.len());
-            let mut col_values = Vec::with_capacity(values.len());
-            values.iter().enumerate().for_each(|(_, value)| {
-                if let Some(value) = value {
-                    nullbits.append(true);
-                    col_values.push(value);
-                } else {
-                    nullbits.append(false);
-                    col_values.push(0);
-                }
-            });
+            let nullbits = values
+                .nulls()
+                .map(|nulls| nulls.buffer().as_slice().to_vec())
+                .unwrap_or_else(|| {
+                    NullBuffer::new_valid(values.len())
+                        .buffer()
+                        .as_slice()
+                        .to_vec()
+                });
+            let col_values: Vec<i64> = values.iter().map(|value| value.unwrap_or(0)).collect();
             (nullbits, col_values)
         }
         TimeUnit::Microsecond => {
@@ -415,17 +489,16 @@ pub fn build_timestamp_column<'a>(
                 .ok_or_else(|| Error::Common {
                     content: format!("column {} is not int64", col_name),
                 })?;
-            let mut nullbits = BooleanBufferBuilder::new(values.len());
-            let mut col_values = Vec::with_capacity(values.len());
-            values.iter().enumerate().for_each(|(_, value)| {
-                if let Some(value) = value {
-                    nullbits.append(true);
-                    col_values.push(value);
-                } else {
-                    nullbits.append(false);
-                    col_values.push(0);
-                }
-            });
+            let nullbits = values
+                .nulls()
+                .map(|nulls| nulls.buffer().as_slice().to_vec())
+                .unwrap_or_else(|| {
+                    NullBuffer::new_valid(values.len())
+                        .buffer()
+                        .as_slice()
+                        .to_vec()
+                });
+            let col_values: Vec<i64> = values.iter().map(|value| value.unwrap_or(0)).collect();
             (nullbits, col_values)
         }
         TimeUnit::Nanosecond => {
@@ -435,21 +508,20 @@ pub fn build_timestamp_column<'a>(
                 .ok_or_else(|| Error::Common {
                     content: format!("column {} is not int64", col_name),
                 })?;
-            let mut nullbits = BooleanBufferBuilder::new(values.len());
-            let mut col_values = Vec::with_capacity(values.len());
-            values.iter().enumerate().for_each(|(_, value)| {
-                if let Some(value) = value {
-                    nullbits.append(true);
-                    col_values.push(value);
-                } else {
-                    nullbits.append(false);
-                    col_values.push(0);
-                }
-            });
+            let nullbits = values
+                .nulls()
+                .map(|nulls| nulls.buffer().as_slice().to_vec())
+                .unwrap_or_else(|| {
+                    NullBuffer::new_valid(values.len())
+                        .buffer()
+                        .as_slice()
+                        .to_vec()
+                });
+            let col_values: Vec<i64> = values.iter().map(|value| value.unwrap_or(0)).collect();
             (nullbits, col_values)
         }
     };
-    let nullbits = fbb.create_vector(nullbits.finish().values());
+    let nullbits = fbb.create_vector(&nullbits);
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_int_value(values);
@@ -475,18 +547,17 @@ pub fn build_i64_column<'a>(
         .ok_or_else(|| Error::Common {
             content: format!("column {} is not int64", col_name),
         })?;
-    let mut nullbits = BooleanBufferBuilder::new(values.len());
-    let mut col_values = Vec::with_capacity(values.len());
-    values.iter().enumerate().for_each(|(_, value)| {
-        if let Some(value) = value {
-            nullbits.append(true);
-            col_values.push(value);
-        } else {
-            nullbits.append(false);
-            col_values.push(0);
-        }
-    });
-    let nullbits = fbb.create_vector(nullbits.finish().values());
+    let nullbits = values
+        .nulls()
+        .map(|nulls| nulls.buffer().as_slice().to_vec())
+        .unwrap_or_else(|| {
+            NullBuffer::new_valid(values.len())
+                .buffer()
+                .as_slice()
+                .to_vec()
+        });
+    let col_values: Vec<i64> = values.iter().map(|value| value.unwrap_or(0)).collect();
+    let nullbits = fbb.create_vector(&nullbits);
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_int_value(values);
@@ -512,18 +583,17 @@ pub fn build_f64_column<'a>(
         .ok_or_else(|| Error::Common {
             content: format!("column {} is not float64", col_name),
         })?;
-    let mut nullbits = BooleanBufferBuilder::new(values.len());
-    let mut col_values = Vec::with_capacity(values.len());
-    values.iter().enumerate().for_each(|(_, value)| {
-        if let Some(value) = value {
-            nullbits.append(true);
-            col_values.push(value);
-        } else {
-            nullbits.append(false);
-            col_values.push(0.0);
-        }
-    });
-    let nullbits = fbb.create_vector(nullbits.finish().values());
+    let nullbits = values
+        .nulls()
+        .map(|nulls| nulls.buffer().as_slice().to_vec())
+        .unwrap_or_else(|| {
+            NullBuffer::new_valid(values.len())
+                .buffer()
+                .as_slice()
+                .to_vec()
+        });
+    let col_values: Vec<f64> = values.iter().map(|value| value.unwrap_or(0.0)).collect();
+    let nullbits = fbb.create_vector(&nullbits);
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_float_value(values);
@@ -549,18 +619,18 @@ pub fn build_u64_column<'a>(
         .ok_or_else(|| Error::Common {
             content: format!("column {} is not uint64", col_name),
         })?;
-    let mut nullbits = BooleanBufferBuilder::new(values.len());
-    let mut col_values = Vec::with_capacity(values.len());
-    values.iter().enumerate().for_each(|(_, value)| {
-        if let Some(value) = value {
-            nullbits.append(true);
-            col_values.push(value);
-        } else {
-            nullbits.append(false);
-            col_values.push(0);
-        }
-    });
-    let nullbits = fbb.create_vector(nullbits.finish().values());
+
+    let nullbits = values
+        .nulls()
+        .map(|nulls| nulls.buffer().as_slice().to_vec())
+        .unwrap_or_else(|| {
+            NullBuffer::new_valid(values.len())
+                .buffer()
+                .as_slice()
+                .to_vec()
+        });
+    let col_values: Vec<u64> = values.iter().map(|value| value.unwrap_or(0)).collect();
+    let nullbits = fbb.create_vector(&nullbits);
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_uint_value(values);
@@ -586,18 +656,17 @@ pub fn build_bool_column<'a>(
         .ok_or_else(|| Error::Common {
             content: format!("column {} is not bool", col_name),
         })?;
-    let mut nullbits = BooleanBufferBuilder::new(values.len());
-    let mut col_values = Vec::with_capacity(values.len());
-    values.iter().enumerate().for_each(|(_, value)| {
-        if let Some(value) = value {
-            nullbits.append(true);
-            col_values.push(value);
-        } else {
-            nullbits.append(false);
-            col_values.push(false);
-        }
-    });
-    let nullbits = fbb.create_vector(nullbits.finish().values());
+    let nullbits = values
+        .nulls()
+        .map(|nulls| nulls.buffer().as_slice().to_vec())
+        .unwrap_or_else(|| {
+            NullBuffer::new_valid(values.len())
+                .buffer()
+                .as_slice()
+                .to_vec()
+        });
+    let col_values: Vec<bool> = values.iter().map(|value| value.unwrap_or(false)).collect();
+    let nullbits = fbb.create_vector(&nullbits);
     let values = fbb.create_vector(&col_values);
     let mut values_builder = ValuesBuilder::new(fbb);
     values_builder.add_bool_value(values);

@@ -9,7 +9,6 @@ use arrow_array::{
 use arrow_buffer::buffer::BooleanBuffer;
 use arrow_buffer::builder::BooleanBufferBuilder;
 use arrow_schema::{DataType, TimeUnit};
-use models::column_data::PrimaryColumnData;
 use models::column_data_ref::PrimaryColumnDataRef;
 use models::schema::tskv_table_schema::{ColumnType, TableColumn};
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,6 @@ use crate::error::{
 use crate::tsm::codec::{
     get_bool_codec, get_f64_codec, get_i64_codec, get_str_codec, get_ts_codec, get_u64_codec,
 };
-use crate::tsm::mutable_column::MutableColumn;
 use crate::tsm::reader::data_buf_to_arrow_array;
 
 #[derive(Debug)]
@@ -348,157 +346,6 @@ impl Page {
         let meta = PageMeta {
             num_values: data_len as u32,
             column: table_column,
-            statistics,
-        };
-        Ok(Page { bytes, meta })
-    }
-
-    pub fn col_to_page(column: &MutableColumn) -> TskvResult<Page> {
-        let null_count = 1;
-        let len_bitset = ((column.valid().len() + 7) >> 3) as u32;
-        let data_len = column.valid().len() as u64;
-        let mut buf = vec![];
-        let statistics = match column.data() {
-            PrimaryColumnData::F64(array, min, max) => {
-                let target_array = array
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, val)| {
-                        if column.valid().get_bit(idx) {
-                            Some(*val)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let encoder = get_f64_codec(column.column_desc().encoding);
-                encoder
-                    .encode(&target_array, &mut buf)
-                    .context(EncodeSnafu)?;
-
-                PageStatistics::F64(ValueStatistics::new(
-                    Some(*min),
-                    Some(*max),
-                    None,
-                    null_count,
-                ))
-            }
-            PrimaryColumnData::I64(array, min, max) => {
-                let target_array = array
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, val)| {
-                        if column.valid().get_bit(idx) {
-                            Some(*val)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if column.column_desc().column_type.is_time() {
-                    let encoder = get_ts_codec(column.column_desc().encoding);
-                    encoder
-                        .encode(&target_array, &mut buf)
-                        .context(EncodeSnafu)?;
-                } else {
-                    let encoder = get_i64_codec(column.column_desc().encoding);
-                    encoder
-                        .encode(&target_array, &mut buf)
-                        .context(EncodeSnafu)?;
-                }
-                PageStatistics::I64(ValueStatistics::new(
-                    Some(*min),
-                    Some(*max),
-                    None,
-                    null_count,
-                ))
-            }
-            PrimaryColumnData::U64(array, min, max) => {
-                let target_array = array
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, val)| {
-                        if column.valid().get_bit(idx) {
-                            Some(*val)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let encoder = get_u64_codec(column.column_desc().encoding);
-                encoder
-                    .encode(&target_array, &mut buf)
-                    .context(EncodeSnafu)?;
-
-                PageStatistics::U64(ValueStatistics::new(
-                    Some(*min),
-                    Some(*max),
-                    None,
-                    null_count,
-                ))
-            }
-            PrimaryColumnData::String(array, min, max) => {
-                let target_array = array
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, val)| {
-                        if column.valid().get_bit(idx) {
-                            Some(val.as_bytes())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let encoder = get_str_codec(column.column_desc().encoding);
-                encoder
-                    .encode(&target_array, &mut buf)
-                    .context(EncodeSnafu)?;
-
-                PageStatistics::Bytes(ValueStatistics::new(
-                    Some(min.as_bytes().to_vec()),
-                    Some(max.as_bytes().to_vec()),
-                    None,
-                    null_count,
-                ))
-            }
-            PrimaryColumnData::Bool(array, min, max) => {
-                let target_array = array
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, val)| {
-                        if column.valid().get_bit(idx) {
-                            Some(*val)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let encoder = get_bool_codec(column.column_desc().encoding);
-                encoder
-                    .encode(&target_array, &mut buf)
-                    .context(EncodeSnafu)?;
-
-                PageStatistics::Bool(ValueStatistics::new(
-                    Some(*min),
-                    Some(*max),
-                    None,
-                    null_count,
-                ))
-            }
-        };
-        let mut data = vec![];
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&buf);
-        let data_crc = hasher.finalize().to_be_bytes();
-        data.extend_from_slice(&len_bitset.to_be_bytes());
-        data.extend_from_slice(&data_len.to_be_bytes());
-        data.extend_from_slice(&data_crc);
-        data.extend_from_slice(column.valid().as_slice());
-        data.extend_from_slice(&buf);
-        let bytes = bytes::Bytes::from(data);
-        let meta = PageMeta {
-            num_values: column.valid().len() as u32,
-            column: column.column_desc().clone(),
             statistics,
         };
         Ok(Page { bytes, meta })

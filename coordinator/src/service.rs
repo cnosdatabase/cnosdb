@@ -36,9 +36,7 @@ use models::schema::tskv_table_schema::{ColumnType, TskvTableSchemaRef};
 use models::schema::{DEFAULT_CATALOG, TIME_FIELD_NAME, USAGE_SCHEMA};
 use models::utils::now_timestamp_nanos;
 use models::{record_batch_decode, SeriesKey, Tag};
-use protocol_parser::lines_convert::{
-    arrow_array_to_points, line_to_batches, mutable_batches_to_point,
-};
+use protocol_parser::lines_convert::{arrow_array_to_points, line_to_point};
 use protocol_parser::Line;
 use protos::kv_service::admin_command::Command::*;
 use protos::kv_service::*;
@@ -616,13 +614,12 @@ impl Coordinator for CoordService {
 
         let mut requests = Vec::new();
         for lines in map_lines.into_values() {
-            let batches = line_to_batches(&lines.lines).map_err(|e| {
+            let points = Arc::new(line_to_point(&lines.lines, db).map_err(|_| {
                 CommonSnafu {
-                    msg: format!("line to batch error: {}", e),
+                    msg: "line to point error".to_string(),
                 }
                 .build()
-            })?;
-            let points = Arc::new(mutable_batches_to_point(db, batches));
+            })?);
             write_bytes += points.len();
             requests.extend(
                 self.push_points_to_requests(tenant, db, precision, lines.info, points, span_ctx)
