@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 use std::fmt::Display;
+use std::process;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use tokio::runtime::Runtime;
 use tokio::time::sleep;
 use trace::global_logging::init_global_logging;
 use trace::global_tracing::{finalize_global_tracing, init_global_tracing};
-use trace::info;
+use trace::{error, info};
 
 use crate::report::ReportService;
 
@@ -196,10 +197,22 @@ fn main() -> Result<(), std::io::Error> {
 
         let _ = std::fs::create_dir_all(config.storage.path);
         let (storage, coordinator) = match deployment_mode {
-            DeploymentMode::QueryTskv => builder.build_query_storage(&mut server).await,
-            DeploymentMode::Tskv => builder.build_storage_server(&mut server).await,
-            DeploymentMode::Query => builder.build_query_server(&mut server).await,
-            DeploymentMode::Singleton => builder.build_singleton(&mut server).await,
+            DeploymentMode::QueryTskv => handle_error(
+                builder.build_query_storage(&mut server).await,
+                "Failed to build query storage",
+            ),
+            DeploymentMode::Tskv => handle_error(
+                builder.build_storage_server(&mut server).await,
+                "Failed to build storage server",
+            ),
+            DeploymentMode::Query => handle_error(
+                builder.build_query_server(&mut server).await,
+                "Failed to build query server",
+            ),
+            DeploymentMode::Singleton => handle_error(
+                builder.build_singleton(&mut server).await,
+                "Failed to build singleton server",
+            ),
         };
 
         info!("CnosDB server start as {} mode", deployment_mode);
@@ -225,7 +238,12 @@ fn main() -> Result<(), std::io::Error> {
     });
     Ok(())
 }
-
+fn handle_error<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
+    result.unwrap_or_else(|e| {
+        error!("{}: {:?}", context, e);
+        process::exit(1);
+    })
+}
 fn parse_config(run_args: &RunArgs) -> config::tskv::Config {
     println!("-----------------------------------------------------------");
     println!("Using Config File: {}\n", run_args.config);

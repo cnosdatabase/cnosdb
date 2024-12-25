@@ -23,7 +23,7 @@ use crate::compaction::job::CompactJob;
 use crate::compaction::metrics::{CompactionType, VnodeCompactionMetrics};
 use crate::compaction::{self, check, pick_compaction, CompactTask};
 use crate::database::Database;
-use crate::error::{IndexErrSnafu, MetaSnafu, TskvResult};
+use crate::error::{FileSystemSnafu, IndexErrSnafu, MetaSnafu, TskvResult};
 use crate::file_system::async_filesystem::LocalFileSystem;
 use crate::file_system::FileSystem;
 use crate::index::IndexResult;
@@ -34,7 +34,6 @@ use crate::tsfamily::tseries_family::TseriesFamily;
 use crate::version_set::VersionSet;
 use crate::vnode_store::VnodeStorage;
 use crate::{file_utils, Engine, TsKvContext};
-
 // TODO: A small summay channel capacity can cause a block
 pub const COMPACT_REQ_CHANNEL_CAP: usize = 1024;
 pub const SUMMARY_REQ_CHANNEL_CAP: usize = 1024;
@@ -69,7 +68,7 @@ impl TsKv {
             shared_options.clone(),
             metrics.clone(),
         )
-        .await;
+        .await?;
 
         let ctx = Arc::new(TsKvContext {
             version_set,
@@ -113,10 +112,9 @@ impl TsKv {
         meta: MetaRef,
         opt: Arc<Options>,
         metrics: Arc<MetricsRegister>,
-    ) -> (Arc<RwLock<VersionSet>>, Summary) {
+    ) -> TskvResult<(Arc<RwLock<VersionSet>>, Summary)> {
         let summary_dir = opt.storage.summary_dir();
-        LocalFileSystem::create_dir_if_not_exists(Some(&summary_dir)).unwrap();
-
+        LocalFileSystem::create_dir_if_not_exists(Some(&summary_dir)).context(FileSystemSnafu)?;
         let summary_file = file_utils::make_summary_file(&summary_dir, 0);
         let summary = if LocalFileSystem::try_exists(&summary_file) {
             Summary::recover(meta, opt, runtime, memory_pool, metrics.clone())
@@ -129,7 +127,7 @@ impl TsKv {
         };
         let version_set = summary.version_set();
 
-        (version_set, summary)
+        Ok((version_set, summary))
     }
 
     fn run_summary_job(

@@ -246,7 +246,7 @@ pub fn write_meta_node_config_files(
             }
             std::fs::write(&config_path, meta_config.to_string_pretty()).unwrap();
         } else {
-            meta_config = read_meta_store_config(Some(config_path));
+            meta_config = read_meta_store_config(Some(config_path)).unwrap();
         }
         meta_configs.push(meta_config);
     }

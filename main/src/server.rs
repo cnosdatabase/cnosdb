@@ -16,7 +16,7 @@ use tokio::sync::oneshot::Sender;
 use tokio::task::JoinHandle;
 use tokio::time;
 use trace::error;
-use tskv::{EngineRef, TsKv};
+use tskv::{EngineRef, TsKv, TskvError};
 
 use crate::flight_sql::FlightSqlServiceAdapter;
 use crate::http::http_service::{HttpService, ServerMode};
@@ -41,6 +41,12 @@ pub enum Error {
 
     #[snafu(display("Server Common Error : {}", reason))]
     Common { reason: String },
+
+    #[snafu(display("Tskv Error: {}", source), context(false))]
+    Tskv {
+        source: TskvError,
+        backtrace: Backtrace,
+    },
 }
 
 impl From<tonic::transport::Error> for Error {
@@ -132,9 +138,13 @@ impl ServiceBuilder {
     pub async fn build_storage_server(
         &self,
         server: &mut Server,
-    ) -> (Option<EngineRef>, CoordinatorRef) {
+    ) -> Result<(Option<EngineRef>, CoordinatorRef), Error> {
         let meta = self.create_meta(self.metrics_register.clone()).await;
-        meta.add_data_node().await.unwrap();
+        meta.add_data_node().await.map_err(|e| {
+            let reason = format!("Failed to add data node: {:?}", e);
+            error!("{}", reason);
+            Error::Common { reason }
+        })?;
         tokio::spawn(regular_report_node_metrics(
             meta.clone(),
             self.config.meta.report_time_interval,
@@ -142,7 +152,8 @@ impl ServiceBuilder {
 
         let kv_inst = self
             .create_tskv(meta.clone(), self.runtime.clone(), self.memory_pool.clone())
-            .await;
+            .await?;
+
         let coord = self
             .create_coord(meta, Some(kv_inst.clone()), self.memory_pool.clone())
             .await;
@@ -164,13 +175,13 @@ impl ServiceBuilder {
             server.add_service(Box::new(tcp_service));
         }
 
-        (Some(kv_inst), coord)
+        Ok((Some(kv_inst), coord))
     }
 
     pub async fn build_query_server(
         &self,
         server: &mut Server,
-    ) -> (Option<EngineRef>, CoordinatorRef) {
+    ) -> Result<(Option<EngineRef>, CoordinatorRef), Error> {
         let meta = self.create_meta(self.metrics_register.clone()).await;
         let coord = self
             .create_coord(meta, None, self.memory_pool.clone())
@@ -189,15 +200,19 @@ impl ServiceBuilder {
             server.add_service(Box::new(flight_sql_service));
         }
 
-        (None, coord)
+        Ok((None, coord))
     }
 
     pub async fn build_query_storage(
         &self,
         server: &mut Server,
-    ) -> (Option<EngineRef>, CoordinatorRef) {
+    ) -> Result<(Option<EngineRef>, CoordinatorRef), Error> {
         let meta = self.create_meta(self.metrics_register.clone()).await;
-        meta.add_data_node().await.unwrap();
+        meta.add_data_node().await.map_err(|e| {
+            let reason = format!("Failed to add data node: {:?}", e);
+            error!("{}", reason);
+            Error::Common { reason }
+        })?;
         tokio::spawn(regular_report_node_metrics(
             meta.clone(),
             self.config.meta.report_time_interval,
@@ -205,7 +220,7 @@ impl ServiceBuilder {
 
         let kv_inst = self
             .create_tskv(meta.clone(), self.runtime.clone(), self.memory_pool.clone())
-            .await;
+            .await?;
         let coord = self
             .create_coord(meta, Some(kv_inst.clone()), self.memory_pool.clone())
             .await;
@@ -231,13 +246,13 @@ impl ServiceBuilder {
             server.add_service(Box::new(tcp_service));
         }
 
-        (Some(kv_inst), coord)
+        Ok((Some(kv_inst), coord))
     }
 
     pub async fn build_singleton(
         &self,
         server: &mut Server,
-    ) -> (Option<EngineRef>, CoordinatorRef) {
+    ) -> Result<(Option<EngineRef>, CoordinatorRef), Error> {
         meta::service::single::start_singe_meta_server(
             self.config.storage.path.clone(),
             self.config.global.cluster_name.clone(),
@@ -263,7 +278,7 @@ impl ServiceBuilder {
         meta: MetaRef,
         runtime: Arc<Runtime>,
         memory_pool: MemoryPoolRef,
-    ) -> EngineRef {
+    ) -> Result<EngineRef, Error> {
         let options = tskv::Options::from(&self.config);
         let kv = TsKv::open(
             meta,
@@ -272,12 +287,11 @@ impl ServiceBuilder {
             memory_pool,
             self.metrics_register.clone(),
         )
-        .await
-        .unwrap();
+        .await?;
 
         let kv: EngineRef = Arc::new(kv);
 
-        kv
+        Ok(kv)
     }
 
     async fn create_dbms(&self, coord: CoordinatorRef, memory_pool: MemoryPoolRef) -> DBMSRef {

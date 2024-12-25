@@ -8,7 +8,7 @@ use std::path::Path;
 
 use figment::providers::{Env, Format, Toml};
 use figment::value::Uncased;
-use figment::Figment;
+use figment::{Error, Figment};
 pub use heart_beat_config::*;
 use macros::EnvKeys;
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ impl Opt {
     }
 }
 
-pub fn get_opt(path: Option<impl AsRef<Path>>) -> Opt {
+pub fn get_opt(path: Option<impl AsRef<Path>>) -> Result<Opt, Error> {
     let env_keys = Opt::env_keys();
     let env_key_map = env_keys
         .into_iter()
@@ -73,7 +73,7 @@ pub fn get_opt(path: Option<impl AsRef<Path>>) -> Opt {
         }
     }));
 
-    figment.extract().unwrap()
+    figment.extract()
 }
 
 #[cfg(test)]
